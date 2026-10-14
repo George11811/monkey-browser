@@ -114,7 +114,8 @@ class ScriptInjector(
             // 逐帧加载：一页可能有多个跨域 iframe，每帧还会多次导航，属高频噪声。
             // 降为 DEBUG —— 需要时用 Help | Diagnostic Tools | Debug Log Settings 打开 RiderMonkeyBrowser。
             logger.debug(
-                "[RM-BROWSER] onLoadStart main=" + frame.isMain + " frame=" + frameId + " url=" + url
+                "[RM-BROWSER] onLoadStart main=" + frame.isMain + " frame=" + frameId +
+                    " type=" + transitionType + " url=" + url
             )
             if (frame.isMain) {
                 if (frameId != null && url != null && url == lastMainUrl[frameId]) {
@@ -138,6 +139,20 @@ class ScriptInjector(
 
         override fun onLoadEnd(cefBrowser: CefBrowser, frame: CefFrame, httpStatusCode: Int) {
             logger.debug("[RM-BROWSER] onLoadEnd main=" + frame.isMain + " status=" + httpStatusCode)
+            // statusCode == 0 表示这次 onLoadEnd **没有对应的网络文档**：典型是「导航到当前同一个
+            // URL」，CEF 会成对触发 onLoadStart / onLoadEnd、两者落在同一毫秒且 status=0。
+            //
+            // 2026-10-14 用 DEBUG 日志实测定位（Rider、v2ex、5 次主 frame 导航）：
+            //   真实导航   3 次  status=200  start→end 780–829ms  注入 readyState=loading
+            //   同一 URL  2 次  status=0    start→end 0ms        注入 readyState=complete
+            // 后者的早档走 release 分支没注入，紧接着的 onLoadEnd 却注入了 —— 于是 248KB 的换皮
+            // 脚本在**已经渲染完的文档**里再跑一遍，页面当场重排，即用户反复报告的「闪原有样式」。
+            //
+            // 放开 file:（本地文档的 status 同样是 0，但它是真实文档）。
+            if (frame.isMain && httpStatusCode == 0 && frame.url?.startsWith("file:") != true) {
+                logger.info("[RM-INJECT] onLoadEnd 无网络文档（status=0），跳过主 frame 注入")
+                return
+            }
             injectInto(frame)
         }
 
@@ -167,6 +182,23 @@ class ScriptInjector(
                 logger.info("[RM-INJECT] 脚本抛异常 " + message.removePrefix(ERR_PREFIX))
             }
             return false
+        }
+
+        /**
+         * 纯诊断日志（DEBUG，默认关闭）：记录 `onAddressChange` 的时机与 URL。
+         *
+         * 用途只有一个——量出 `onAddressChange`（文档提交那一刻）比 `onLoadEnd`（complete）
+         * 早多少。这个差值决定是否值得加一档以它为触发点的早档注入，用来缓解
+         * 「闪原样式」。**它不改变任何行为。**
+         *
+         * 配合 `onLoadStart` / `onLoadEnd` 的 DEBUG 行与 `[RM-INJECT] 注入` / `脚本执行完毕`
+         * 的 INFO 行，可以还原出单个页面完整的时机序列。
+         */
+        override fun onAddressChange(cefBrowser: CefBrowser, frame: CefFrame, url: String) {
+            logger.debug(
+                "[RM-BROWSER] onAddressChange main=" + frame.isMain +
+                    " frame=" + frame.identifier + " url=" + url
+            )
         }
     }
 
@@ -316,5 +348,6 @@ class ScriptInjector(
     private companion object {
         const val OK_PREFIX: String = "__RM_INJECT_OK__"
         const val ERR_PREFIX: String = "__RM_INJECT_ERR__"
+
     }
 }

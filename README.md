@@ -4,11 +4,11 @@
 用户脚本（`.user.js`）。
 
 开发方案见 [docs/Monkey-Browser-Development-Plan.md](docs/Monkey-Browser-Development-Plan.md)，
-关键取舍与实测结论见 [docs/adr/](docs/adr/)（14 篇 ADR）。
+关键取舍与实测结论见 [docs/adr/](docs/adr/)（15 篇 ADR）。
 
 ## 当前进度
 
-当前版本 **0.16.1**。构建 + 176 个单测（0 失败）+ Plugin Verifier 校验通过（Compatible）。
+当前版本 **0.17.3**。构建 + 176 个单测（0 失败）+ Plugin Verifier 校验通过（Compatible）。
 
 | 里程碑 | 状态 |
 | --- | --- |
@@ -17,7 +17,7 @@
 | JCEF 注入时机 PoC（方案 §7 第 1 项） | 已完成，结论见 ADR-0002（**已于 2026-10-13 修订**：解析期 `loading` 可达，但 `document-start` 仍不可行） |
 | 跨容器组件迁移 PoC（方案 §7 第 2 项） | 已完成并实测通过，见 ADR-0006 |
 | Userscript 解析 / 匹配 | 已实现，语义见 ADR-0004 |
-| Userscript 注入（两档时机 + 落点自愈） | 已实现，架构见 ADR-0003 |
+| Userscript 注入（两档时机 + 落点自愈） | 已实现，架构见 ADR-0003（曾尝试「早档探针」方案并**已回滚**，原因见该 ADR 的修订节）|
 | 脚本库（文件夹即库）+ 脚本管理工具窗 + 全局暂停 | 已实现 |
 | GM 存储 API 与 `GM_addStyle` | 已实现，语义与安全模型见 ADR-0005 |
 | 中央 Editor Tab 浏览器、ToolWindow ↔ Editor Tab 互转 | 已实现 |
@@ -34,6 +34,7 @@
 | `GM_download` / `GM.download`（落盘到系统下载目录，重名加序号） | 已实现，见 ADR-0012 |
 | `GM_openInTab` / `GM.openInTab`（含 `close()` 句柄；`onclose` 仅在脚本主动关闭时触发） | 已实现，见 ADR-0012 |
 | 自动更新（`@updateURL` / `@downloadURL`） | 已实现，见 ADR-0013。**刻意做成「按需检查 + 用户确认后应用」，不是静默自动替换**——理由见该 ADR 开头 |
+| 在系统浏览器中打开当前页（JCEF 访问不了的站点走这条） | 已实现，动机见 ADR-0015 |
 | P2 其余（脚本菜单命令 `GM_registerMenuCommand`） | 未开始 |
 
 > **命名说明**：本插件原名 `Rider Monkey Browser`（0.16.1 及以前）。插件名含 JetBrains 商标词
@@ -120,7 +121,7 @@ gradlew clean buildPlugin check verifyPluginProjectConfiguration verifyPlugin ->
 gradlew checkHandlerVersion                                                 -> BUILD SUCCESSFUL
 gradlew checkGmRuntime                                                      -> BUILD SUCCESSFUL（56 项断言，0 失败）
 gradlew verifyPlugin
-  -> Plugin com.ridermonkey.browser:0.16.1 against RD-262.8665.328: Compatible
+  -> Plugin com.ridermonkey.browser:0.17.3 against RD-262.8665.328: Compatible
      8 usages of deprecated API, 12 usages of experimental API
 ```
 
@@ -213,6 +214,7 @@ Help | Diagnostic Tools | Debug Log Settings...
 | [ADR-0012](docs/adr/0012-download-openintab-and-xhr-extras.md) | GM_download / GM_openInTab 与 xhr 的 responseType·onprogress·abort |
 | [ADR-0013](docs/adr/0013-script-updates.md) | 脚本更新检查（@updateURL）与「不静默覆盖」的取舍 |
 | [ADR-0014](docs/adr/0014-bookmarks.md) | 书签：文件存储格式与弹出菜单式 UI |
+| [ADR-0015](docs/adr/0015-jcef-site-isolation-cloudflare-loop.md) | Cloudflare 挑战页死循环：JCEF 站点隔离（**非插件缺陷**） |
 
 ## 用户脚本
 
@@ -245,7 +247,7 @@ src/main/resources/
 src/test/kotlin/        13 个测试类 / 176 个单测（纯逻辑，不依赖 IDE）
 tools/check-gm-runtime.mjs   gm-api.js 的 Node 沙箱行为断言（56 项）
 samples/hello.user.js        示例用户脚本
-docs/adr/                    14 篇决策记录
+docs/adr/                    15 篇决策记录
 docs/Monkey-Browser-Development-Plan.md   开发方案
 ```
 
@@ -256,6 +258,10 @@ Swing / JCEF 相关逻辑需要真实 IDE 环境，**没有单元测试**，目�
 - 已对准真正的 Rider 2026.2 平台（RD-262.8665.328）构建通过，并通过 Plugin Verifier 校验为
   **Compatible**；也已在本机 Rider 2026.2 上以构建产物实际安装并手工验证过主要路径。
   但没有自动化 UI 测试，Swing / JCEF 逻辑的回归仍需手工验证。
+- **受 Cloudflare 托管挑战保护的站点可能反复重试**（卡在 "Just a moment..."）：若所在 IDE 把
+  `ide.browser.jcef.osr.siteIsolation.disable` 默认为 true（IDEA 2026.2.3 实测如此，Rider 不会），
+  CEF 会带 `--disable-site-isolation-trials` 启动，跨域 iframe 与顶层文档同进程，Turnstile 无法完成验证。
+  **解法见 ADR-0015；这不是插件缺陷。**
 - 注入时机为「解析期 + 页面加载完成」两档；`document-start` 在 JCEF 上不可行（实测结论见 ADR-0002）。
 - `JBCefApp.isSupported()` 为 false 时（headless 等），面板显示降级提示而不是崩溃。
 

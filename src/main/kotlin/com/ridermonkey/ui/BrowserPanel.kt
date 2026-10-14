@@ -1,6 +1,7 @@
 package com.ridermonkey.ui
 
 import com.intellij.icons.AllIcons
+import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
@@ -93,6 +94,9 @@ class BrowserPanel(
 
     /** 书签：收藏当前页 + 查看/管理已有书签。 */
     private val bookmarkButton = ToolbarButton(AllIcons.Nodes.Favorite)
+
+    /** 在系统浏览器中打开当前页：JCEF 访问不了的站点（如 Cloudflare 挑战）用它绕开。 */
+    private val externalButton = ToolbarButton(AllIcons.General.Web)
 
     /** 容器切换按钮：在侧边栏时显示「编辑区」，在编辑区时显示「侧边栏」。 */
     private val editorButton = ToolbarButton("编辑区")
@@ -230,6 +234,9 @@ class BrowserPanel(
         // 而不是再加一个常在的列表——工具窗横向空间已经很紧。
         bookmarkButton.toolTipText = "书签（收藏当前页面 / 打开已有书签）"
         bookmarkButton.addActionListener { showBookmarks() }
+
+        externalButton.toolTipText = "在系统浏览器中打开当前页"
+        externalButton.addActionListener { openInSystemBrowser() }
         addressField.addActionListener { navigateFromAddressBar() }
 
         addressField.document.addDocumentListener(object : DocumentListener {
@@ -249,13 +256,14 @@ class BrowserPanel(
         // BorderLayout 的 EAST 永远保留，宁可让中间的导航按钮收缩。
         // 紧凑靠左，**不要** GridLayout：GridLayout 会把按钮拉满整行，在中央编辑区（行很宽）时
         // 每个按钮被撑到 100px+，hover 反馈就变成一整块背景（0.8.0 实测到的「奇怪样式」）。
-        // 按钮宽度已显式给到 26px 绕开了 L&F 的 82px 下限，五个按钮合计 130px，任何可用宽度都放得下。
+        // 按钮宽度已显式给到 26px 绕开了 L&F 的 82px 下限，六个按钮合计 156px，任何可用宽度都放得下。
         val navButtons = JPanel(FlowLayout(FlowLayout.LEFT, 1, 0))
         navButtons.add(backButton)
         navButtons.add(forwardButton)
         navButtons.add(reloadButton)
         navButtons.add(stopButton)
         navButtons.add(bookmarkButton)
+        navButtons.add(externalButton)
 
         // 右侧两个按钮放进 EAST：BorderLayout 的 EAST 永远按 preferred 宽度保留，
         // 面板再窄也不会压缩它（代价是这部分宽度无条件从 CENTER 的导航按钮区扣走）。
@@ -425,7 +433,19 @@ class BrowserPanel(
         return true
     }
 
-    /** 直接导航到指定地址（会话恢复用）。内核未就绪时先记下，就绪后自动执行。 */
+    /**
+     * 直接导航到指定地址（会话恢复、书签「在当前标签页打开」都走这里）。
+     *
+     * 内核未就绪时先记下地址，并驱动一次内核重试，就绪后自动执行。
+     *
+     * 为什么不能只记下地址就返回：内核是延迟创建的（见 [createBrowserComponent] 里不能
+     * `setCreateImmediately(true)` 的说明），刚新建的标签页里 [browser] 为 null；只存
+     * [pendingUrl] 的话，本次导航能否发生就完全取决于「之后还会不会再来一次 componentResized」。
+     *
+     * 边界（如实记录，勿夸大）：组件尺寸仍为 0 时 [ensureKernel] 会在尺寸检查处直接 return，
+     * **既不创建也不排程**，因此该场景依然要等后续组件事件。驱动重试是把「内核已在创建流程中」
+     * 这一类从被动等待变为主动推进，并**没有**消除对组件事件的依赖。
+     */
     fun navigateTo(url: String) {
         val target = url.trim()
         if (target.isEmpty()) return
@@ -434,6 +454,9 @@ class BrowserPanel(
         if (cef == null) {
             pendingUrl = target
             setAddressText(target)
+            // 返回值此处用不上：本分支无论重试结果如何都要 return。
+            // 顺序要紧——pendingUrl 必须先设好，ensureKernel 同步成功时会立刻消费它。
+            retryKernelIfNeeded()
             return
         }
         setAddressText(target)
@@ -535,6 +558,36 @@ class BrowserPanel(
     }
 
     /**
+     * 在系统浏览器中打开当前页。
+     *
+     * 存在的理由：JCEF 并不总能访问目标站点。实测 IDEA 的 JCEF 默认带
+     * `--disable-site-isolation-trials`，跨域 iframe 与顶层文档同进程，Cloudflare 的 Turnstile
+     * 永远无法完成验证（详见 ADR-0015），此时内嵌浏览器对该站点等于不可用。
+     *
+     * 这条通道是把地址交给系统默认浏览器，**绕开**整个 JCEF 层——`--disable-site-isolation-trials`
+     * 是 CEF 进程级参数，插件既不能设置也不能覆盖，所以只能绕开，修不了。
+     */
+    private fun openInSystemBrowser() {
+        val target = currentUrl()?.trim().orEmpty()
+        if (target.isEmpty() || target == UrlUtils.START_PAGE) {
+            lastError = "当前页没有可打开的地址"
+            renderStatus()
+            return
+        }
+        runCatching { BrowserUtil.browse(target) }
+            .onSuccess {
+                logger.info("[RM-BROWSER] 已交给系统浏览器 -> " + target)
+                lastError = "已在系统浏览器中打开"
+                renderStatus()
+            }
+            .onFailure {
+                logger.info("[RM-BROWSER] 打开系统浏览器失败：" + it.message)
+                lastError = "打开系统浏览器失败：" + it.message
+                renderStatus()
+            }
+    }
+
+    /**
      * 让 CEF 内核尺寸跟随 Swing 组件。
      *
      * 实测问题：面板变窄后网页仍按原宽度渲染，出现横向滚动条、内容不跟随窗口大小。
@@ -632,7 +685,11 @@ class BrowserPanel(
                 val group = JMenu(menuLabel(item.title))
                 group.toolTipText = item.url
                 group.add(JMenuItem("在当前标签页打开").apply {
-                    addActionListener { browser?.cefBrowser?.loadURL(item.url) }
+                    // 必须走 navigateTo，**不能**写成 browser?.cefBrowser?.loadURL()：
+                    // 新标签页的内核是延迟创建的，刚新建时 browser 还是 null，安全调用会把
+                    // 「内核未就绪」静默吞掉，表现就是点了完全没反应。
+                    // 同菜单里的「在新标签页打开」走 openTab -> navigateTo，所以那条一直正常。
+                    addActionListener { navigateTo(item.url) }
                 })
                 group.add(JMenuItem("在新标签页打开").apply {
                     addActionListener { gmHost?.openTab(item.url, true) }
