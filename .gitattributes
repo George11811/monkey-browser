@@ -1,0 +1,19 @@
+# 统一换行符：仓库内一律存 LF，检出时按平台还原。
+# 关键点：gradlew 是 shell 脚本，必须是 LF。否则 Linux/macOS 上会报
+# "bad interpreter: /bin/sh^M" —— Windows 上很容易被编辑器或 core.autocrlf 改成 CRLF。
+* text=auto
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：禁止任何换行符转换
+*.jar binary
+*.zip binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

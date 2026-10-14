@@ -1,0 +1,30 @@
+<!-- Monkey Browser -->
+<idea-plugin>
+    <id>com.ridermonkey.browser</id>
+    <name>Monkey Browser</name>
+    <vendor>Monkey Browser</vendor>
+
+    <!-- 说明：描述必须以拉丁字符开头且不少于 40 个字符，这是 JetBrains Marketplace 的硬性校验。 -->
+    <description><![CDATA[Monkey Browser embeds a Chromium-based browser (JCEF) inside JetBrains IDEs,
+and aims to support Tampermonkey / Violentmonkey userscripts (.user.js).
+在 IDE 内提供内嵌浏览器（JCEF），并计划支持用户脚本。]]></description>
+
+    <!-- JCEF 在 IntelliJ Platform 中是一个独立的内置插件，必须显式声明依赖。 -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.jcef</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Monkey Browser"
+                    anchor="right"
+                    canCloseContents="false"
+                    factoryClass="com.ridermonkey.ui.BrowserToolWindowFactory"/>
+
+        <toolWindow id="Monkey Scripts"
+                    anchor="right"
+                    canCloseContents="false"
+                    factoryClass="com.ridermonkey.ui.ScriptManagerToolWindowFactory"/>
+
+        <!-- 把浏览器放进中央编辑区（BrowserVirtualFile + BrowserFileEditorProvider）。 -->
+        <fileEditorProvider implementation="com.ridermonkey.ui.BrowserFileEditorProvider"/>
+    </extensions>
+</idea-plugin>

@@ -1,0 +1,29 @@
+# Gradle
+.gradle/
+build/
+
+# IDE
+.idea/
+*.iml
+out/
+
+# Kotlin 2.x 在项目根生成的会话/元数据目录
+.kotlin/
+
+# IntelliJ Platform Gradle Plugin 下载的 IDE 依赖缓存
+.intellijPlatform/
+
+# 本机专属配置：不要把 IDE 路径等机器相关设置提交进仓库。
+# 推荐写在用户级配置 ~/.gradle/gradle.properties，或用 -P<属性>=<值> 传入。
+local.properties
+
+# JVM 崩溃转储
+*.hprof
+hs_err_pid*.log
+
+# Node（tools/check-gm-runtime.mjs 目前零依赖，此处仅为防将来误提交）
+node_modules/
+
+# 操作系统杂项
+.DS_Store
+Thumbs.db
