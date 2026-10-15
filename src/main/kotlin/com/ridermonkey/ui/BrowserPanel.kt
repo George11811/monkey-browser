@@ -378,6 +378,7 @@ class BrowserPanel(
             created.getJBCefClient().addLoadHandler(LoadHandler(), cef)
             created.getJBCefClient().addDisplayHandler(TitleHandler(), cef)
             created.getJBCefClient().addDisplayHandler(UrlHandler(), cef)
+            created.getJBCefClient().addDisplayHandler(TooltipHandler(), cef)
 
             // 会话恢复：标签页创建时可能内核还没就绪，这里补上那次导航。
             pendingUrl?.let { target ->
@@ -514,6 +515,52 @@ class BrowserPanel(
             if (text.isEmpty()) return
             pageTitle = text
             onTitleChanged(text)
+        }
+    }
+
+    /**
+     * 把页面里的 HTML `title` 提示转成 Swing 提示（悬停显示完整内容）。
+     *
+     * **为什么必须自己实现**：CEF **不自己绘制** tooltip，而是通过
+     * `CefDisplayHandler.onTooltip` 把文本交给**宿主 UI** 去显示。JCEF 在 IntelliJ 里走
+     * windowless(OSR) 渲染、没有原生窗口，而 IntelliJ 的 `JBCefClient` 只是把这个回调转发出来
+     * （`JBCefClient$3.onTooltip`）—— `com.intellij.ui.jcef` 整个包里**没有任何一处调用
+     * `setToolTipText`**，也就是说它不会替你显示。
+     *
+     * 不实现它，页面里 `<a title="…">` 这类提示在插件内**完全不出现**。
+     * 用户实测：帖子标题被 CSS 省略后，普通浏览器悬停可看全，插件里不能。
+     */
+    private inner class TooltipHandler : CefDisplayHandlerAdapter() {
+
+        /** 只在提示内容变化时记一条日志，避免悬停刷屏。 */
+        private var lastTooltip: String? = null
+
+        override fun onTooltip(cefBrowser: CefBrowser?, text: String?): Boolean {
+            val target = browser?.component ?: return false
+            val desired = text?.takeIf { it.isNotBlank() }
+            // **必须写遍整棵子树**：Swing 的 ToolTipManager 只认「鼠标事件落在哪个组件」上的
+            // toolTipText，而 JCEF 的 OSR 实现里鼠标事件落在内层画布上；写在外层容器上不会弹。
+            // 2026-10-14 实测：只写 browser.component 时提示不出现，即由此而来。
+            applyTooltip(target, desired)
+            if (desired != null && desired != lastTooltip) {
+                lastTooltip = desired
+                logger.info(
+                    "[RM-BROWSER] tooltip -> " +
+                        (if (desired.length > 60) desired.take(60) + "…" else desired)
+                )
+            }
+            // true = 已由我们处理。
+            return true
+        }
+    }
+
+    /** 把提示文本写到该组件**及其所有子孙**上（Swing 只认鼠标所在那一层的 toolTipText）。 */
+    private fun applyTooltip(component: java.awt.Component, text: String?) {
+        if (component is JComponent && component.toolTipText != text) {
+            component.toolTipText = text
+        }
+        if (component is java.awt.Container) {
+            component.components.forEach { applyTooltip(it, text) }
         }
     }
 

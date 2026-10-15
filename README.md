@@ -4,11 +4,11 @@
 用户脚本（`.user.js`）。
 
 开发方案见 [docs/Monkey-Browser-Development-Plan.md](docs/Monkey-Browser-Development-Plan.md)，
-关键取舍与实测结论见 [docs/adr/](docs/adr/)（15 篇 ADR）。
+关键取舍与实测结论见 [docs/adr/](docs/adr/)（16 篇 ADR）。
 
 ## 当前进度
 
-当前版本 **0.17.3**。构建 + 176 个单测（0 失败）+ Plugin Verifier 校验通过（Compatible）。
+当前版本 **0.17.5**。构建 + 176 个单测（0 失败）+ Plugin Verifier 校验通过（Compatible）。
 
 | 里程碑 | 状态 |
 | --- | --- |
@@ -121,7 +121,7 @@ gradlew clean buildPlugin check verifyPluginProjectConfiguration verifyPlugin ->
 gradlew checkHandlerVersion                                                 -> BUILD SUCCESSFUL
 gradlew checkGmRuntime                                                      -> BUILD SUCCESSFUL（56 项断言，0 失败）
 gradlew verifyPlugin
-  -> Plugin com.ridermonkey.browser:0.17.3 against RD-262.8665.328: Compatible
+  -> Plugin com.ridermonkey.browser:0.17.5 against RD-262.8665.328: Compatible
      8 usages of deprecated API, 12 usages of experimental API
 ```
 
@@ -215,6 +215,7 @@ Help | Diagnostic Tools | Debug Log Settings...
 | [ADR-0013](docs/adr/0013-script-updates.md) | 脚本更新检查（@updateURL）与「不静默覆盖」的取舍 |
 | [ADR-0014](docs/adr/0014-bookmarks.md) | 书签：文件存储格式与弹出菜单式 UI |
 | [ADR-0015](docs/adr/0015-jcef-site-isolation-cloudflare-loop.md) | Cloudflare 挑战页死循环：JCEF 站点隔离（**非插件缺陷**） |
+| [ADR-0016](docs/adr/0016-page-tooltip-needs-host.md) | 页面 tooltip 必须由插件自己接（JCEF 只转发不显示） |
 
 ## 用户脚本
 
@@ -247,7 +248,7 @@ src/main/resources/
 src/test/kotlin/        13 个测试类 / 176 个单测（纯逻辑，不依赖 IDE）
 tools/check-gm-runtime.mjs   gm-api.js 的 Node 沙箱行为断言（56 项）
 samples/hello.user.js        示例用户脚本
-docs/adr/                    15 篇决策记录
+docs/adr/                    16 篇决策记录
 docs/Monkey-Browser-Development-Plan.md   开发方案
 ```
 

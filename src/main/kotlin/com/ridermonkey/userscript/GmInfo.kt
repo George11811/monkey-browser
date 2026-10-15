@@ -19,7 +19,7 @@ object GmInfo {
      * 判为 INTERNAL_API_USAGES 而让构建失败。为避免版本漂移，构建里有一个
      * \`checkHandlerVersion\` 任务会拿它和 build.gradle.kts 的 version 比对，不一致就直接失败。
      */
-    const val HANDLER_VERSION: String = "0.17.3"
+    const val HANDLER_VERSION: String = "0.17.5"
 
     fun toJson(entry: UserscriptEntry, version: String = HANDLER_VERSION): String {
         val meta = entry.metadata
