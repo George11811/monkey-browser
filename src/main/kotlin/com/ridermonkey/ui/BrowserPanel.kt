@@ -13,6 +13,8 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
+import com.ridermonkey.browser.PopupDecision
+import com.ridermonkey.browser.PopupRouting
 import com.ridermonkey.storage.BookmarkStore
 import com.ridermonkey.storage.GmStorage
 import com.ridermonkey.storage.ResourceCache
@@ -27,6 +29,7 @@ import org.cef.CefSettings
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
 import org.cef.handler.CefDisplayHandlerAdapter
+import org.cef.handler.CefLifeSpanHandlerAdapter
 import org.cef.handler.CefLoadHandler
 import org.cef.network.CefRequest
 import java.awt.BorderLayout
@@ -81,7 +84,12 @@ class BrowserPanel(
     /** 主 frame 地址变化，用于会话恢复记录。 */
     private val onUrlChanged: (String) -> Unit = {},
     /** GM_openInTab / 句柄 close() 需要的标签页能力；由 BrowserContainer 实现。 */
-    private val gmHost: GmHost? = null
+    private val gmHost: GmHost? = null,
+    /**
+     * 页面弹窗（`target="_blank"` 链接 / `window.open`）要开的标签页；由 BrowserContainer 实现。
+     * 为 null（宿主未装配）时弹窗一律退到系统浏览器，不再让它变成一个不受管的窗口。
+     */
+    private val openUrlInNewTab: ((String) -> Unit)? = null
 ) : Disposable {
 
     private val root = JPanel(BorderLayout())
@@ -379,6 +387,7 @@ class BrowserPanel(
             created.getJBCefClient().addDisplayHandler(TitleHandler(), cef)
             created.getJBCefClient().addDisplayHandler(UrlHandler(), cef)
             created.getJBCefClient().addDisplayHandler(TooltipHandler(), cef)
+            created.getJBCefClient().addLifeSpanHandler(PopupHandler(), cef)
 
             // 会话恢复：标签页创建时可能内核还没就绪，这里补上那次导航。
             pendingUrl?.let { target ->
@@ -621,9 +630,20 @@ class BrowserPanel(
             renderStatus()
             return
         }
-        runCatching { BrowserUtil.browse(target) }
+        browseExternally(target)
+    }
+
+    /**
+     * 把地址交给系统默认浏览器。
+     *
+     * 两个调用方共用：工具栏按钮（当前页）与**弹窗兜底**（宿主未装配时）。
+     */
+    private fun browseExternally(target: String) {
+        val url = target.trim()
+        if (url.isEmpty()) return
+        runCatching { BrowserUtil.browse(url) }
             .onSuccess {
-                logger.info("[RM-BROWSER] 已交给系统浏览器 -> " + target)
+                logger.info("[RM-BROWSER] 已交给系统浏览器 -> " + url)
                 lastError = "已在系统浏览器中打开"
                 renderStatus()
             }
@@ -826,6 +846,78 @@ class BrowserPanel(
         disposed.set(true)
         browser = null
         logger.info("[RM-BROWSER] 面板#" + System.identityHashCode(this) + " 已释放")
+    }
+
+    /**
+     * 接管页面自己弹出的窗口（`target="_blank"` 链接、`window.open`）。
+     *
+     * **不接管会怎样**：走 CEF 默认弹窗路径，那个窗口不在本插件的标签页模型里、也没有加载链路，
+     * 用户看到的就是一个不知名空白窗口（实测反馈）。
+     *
+     * 三个必须守住的点：
+     * - **返回 true = 取消 CEF 建这个弹窗**，随后由我们自己开标签页，否则会两个都出来。
+     * - **回调在 CEF 线程**：开标签页动的是 Swing（JBTabs / TabInfo），必须切回 EDT（走 [onEdt]）。
+     * - **只覆盖 onBeforePopup**：JCEF 对这类回调是 any-true 聚合语义，动 doClose 会干扰
+     *   IntelliJ 自己的生命周期处理。
+     *
+     * 已知代价（如实记录）：本构建的 `onBeforePopup` 只有 `(browser, frame, targetUrl, targetFrameName)`
+     * 四个参数，**拿不到弹窗浏览器句柄**，所以 `w = window.open(); w.document.write(...)` 这类流程
+     * 的返回值语义救不回来 —— 这类弹窗（无真实地址）走 [PopupDecision.Ignore]，不拦截。
+     */
+    private inner class PopupHandler : CefLifeSpanHandlerAdapter() {
+
+        override fun onBeforePopup(
+            cefBrowser: CefBrowser?,
+            frame: CefFrame?,
+            targetUrl: String?,
+            targetFrameName: String?
+        ): Boolean {
+            val decision = PopupRouting.decide(targetUrl)
+            // targetFrameName 一并记下：它是排查「谁弹的」最直接的线索。
+            logger.info(
+                "[RM-BROWSER] 弹窗请求 target=" + clip(targetUrl) +
+                    " frameName=" + (targetFrameName ?: "-") +
+                    " 决策=" + decision::class.simpleName
+            )
+            return when (decision) {
+                // 无真实地址时：拦截会把对方的 window 句柄变成 null；
+                // 不认识的协议时：不替用户去调系统处理器。两种情况都放行 CEF 默认行为。
+                is PopupDecision.Ignore -> false
+                is PopupDecision.OpenTab -> {
+                    openUrlInNewTabSafely(decision.url)
+                    true
+                }
+                is PopupDecision.SystemBrowser -> {
+                    onEdt { browseExternally(decision.url) }
+                    true
+                }
+            }
+        }
+
+        private fun clip(text: String?): String {
+            val value = text?.trim().orEmpty()
+            if (value.isEmpty()) return "(空)"
+            return if (value.length > 120) value.take(120) + "…" else value
+        }
+    }
+
+    /**
+     * 为新窗口开一个插件标签页；宿主未装配时退到系统浏览器。
+     *
+     * 走 [onEdt] 而不是裸 invokeLater：既保证在 EDT，又带上 `disposed` 守卫与
+     * `ModalityState.any()`（模态对话框弹出时不会把这次开标签页排在模态之后）。
+     */
+    private fun openUrlInNewTabSafely(url: String) {
+        onEdt {
+            val open = openUrlInNewTab
+            if (open == null) {
+                logger.info("[RM-BROWSER] 弹窗没有标签页宿主，改用系统浏览器 -> " + url)
+                browseExternally(url)
+                return@onEdt
+            }
+            open(url)
+            logger.info("[RM-BROWSER] 弹窗已开成标签页 -> " + url)
+        }
     }
 
     private inner class LoadHandler : CefLoadHandler {

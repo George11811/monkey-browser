@@ -8,7 +8,7 @@
 
 ## 当前进度
 
-当前版本 **0.17.5**。构建 + 176 个单测（0 失败）+ Plugin Verifier 校验通过（Compatible）。
+当前版本 **0.17.7**。构建 + 181 个单测（0 失败）+ Plugin Verifier 校验通过（Compatible）。
 
 | 里程碑 | 状态 |
 | --- | --- |
@@ -35,6 +35,7 @@
 | `GM_openInTab` / `GM.openInTab`（含 `close()` 句柄；`onclose` 仅在脚本主动关闭时触发） | 已实现，见 ADR-0012 |
 | 自动更新（`@updateURL` / `@downloadURL`） | 已实现，见 ADR-0013。**刻意做成「按需检查 + 用户确认后应用」，不是静默自动替换**——理由见该 ADR 开头 |
 | 在系统浏览器中打开当前页（JCEF 访问不了的站点走这条） | 已实现，动机见 ADR-0015 |
+| 页面弹窗接管（`target="_blank"` / `window.open` → 插件新标签页，兜底系统浏览器） | 已实现，见 ADR-0017 |
 | P2 其余（脚本菜单命令 `GM_registerMenuCommand`） | 未开始 |
 
 > **命名说明**：本插件原名 `Rider Monkey Browser`（0.16.1 及以前）。插件名含 JetBrains 商标词
@@ -117,11 +118,11 @@ node tools\check-gm-runtime.mjs
 
 ```text
 gradlew clean buildPlugin check verifyPluginProjectConfiguration verifyPlugin -> BUILD SUCCESSFUL
-单测：13 个测试类，tests=176  failures=0  errors=0  skipped=0
+单测：14 个测试类，tests=181  failures=0  errors=0  skipped=0
 gradlew checkHandlerVersion                                                 -> BUILD SUCCESSFUL
 gradlew checkGmRuntime                                                      -> BUILD SUCCESSFUL（56 项断言，0 失败）
 gradlew verifyPlugin
-  -> Plugin com.ridermonkey.browser:0.17.5 against RD-262.8665.328: Compatible
+  -> Plugin com.ridermonkey.browser:0.17.7 against RD-262.8665.328: Compatible
      8 usages of deprecated API, 12 usages of experimental API
 ```
 
@@ -216,6 +217,7 @@ Help | Diagnostic Tools | Debug Log Settings...
 | [ADR-0014](docs/adr/0014-bookmarks.md) | 书签：文件存储格式与弹出菜单式 UI |
 | [ADR-0015](docs/adr/0015-jcef-site-isolation-cloudflare-loop.md) | Cloudflare 挑战页死循环：JCEF 站点隔离（**非插件缺陷**） |
 | [ADR-0016](docs/adr/0016-page-tooltip-needs-host.md) | 页面 tooltip 必须由插件自己接（JCEF 只转发不显示） |
+| [ADR-0017](docs/adr/0017-page-popups.md) | 页面弹窗接管：新标签页 + 系统浏览器兜底（`about:blank` 刻意不拦截） |
 
 ## 用户脚本
 
@@ -245,7 +247,7 @@ src/main/kotlin/com/ridermonkey/
 src/main/resources/
 ├── META-INF/plugin.xml   插件声明
 └── js/gm-api.js          注入到页面的 GM 运行时（由 checkGmRuntime 校验）
-src/test/kotlin/        13 个测试类 / 176 个单测（纯逻辑，不依赖 IDE）
+src/test/kotlin/        14 个测试类 / 181 个单测（纯逻辑，不依赖 IDE）
 tools/check-gm-runtime.mjs   gm-api.js 的 Node 沙箱行为断言（56 项）
 samples/hello.user.js        示例用户脚本
 docs/adr/                    16 篇决策记录

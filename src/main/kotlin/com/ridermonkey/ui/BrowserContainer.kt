@@ -139,7 +139,9 @@ class BrowserContainer(private val project: Project) : Disposable, GmHost {
             onTitleChanged = { title -> updateTabTitle(tab, title) },
             onUrlChanged = { persistState() },
             // GM_openInTab 需要打开/关闭标签页，能力以接口形式注入，避免桥反向依赖 UI。
-            gmHost = this
+            gmHost = this,
+            // 页面弹窗（target="_blank" / window.open）开成插件自己的标签页。
+            openUrlInNewTab = { url -> newTab(url, source = "popup") }
         )
         tab = BrowserTab(panel, BrowserVirtualFile(tabNumber))
         Disposer.register(this, panel)
