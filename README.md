@@ -1,12 +1,22 @@
 # Monkey Browser
 
-在 JetBrains Rider 内提供内嵌浏览器（JCEF），并计划支持 Tampermonkey / Violentmonkey 格式的
+在 JetBrains Rider 内提供内嵌浏览器（JCEF），并支持 Tampermonkey / Violentmonkey 格式的
 用户脚本（`.user.js`）。
 
 开发方案见 [docs/Monkey-Browser-Development-Plan.md](docs/Monkey-Browser-Development-Plan.md)，
 关键取舍与实测结论见 [docs/adr/](docs/adr/)（16 篇 ADR）。
 
-## 当前进度
+## 预览
+
+侧边栏模式
+![侧边栏模式](screenshots/editzone.png)
+编辑区模式
+![编辑区模式](screenshots/sidebar.png)
+
+## 安装插件
+用 Rider/IDEA 插件管理页的 "Install Plugin from Disk" 安装构建好的zip。安装成功后重启ide后，侧边栏会出现monkey browser和monkey scripts两个按钮，点击打开即可。
+
+## 项目进度
 
 当前版本 **0.17.7**。构建 + 181 个单测（0 失败）+ Plugin Verifier 校验通过（Compatible）。
 
@@ -133,16 +143,6 @@ gradlew verifyPlugin
 > 注意：**不要**用 JDK 25 去启动 Gradle 8.x。Gradle 8.14.4 内嵌的 Kotlin DSL 编译器无法解析
 > Java 25 的版本串（`IllegalArgumentException: 25.0.4`）。本项目使用 Gradle 9.8.1 规避该问题。
 
-### 本机代理
-
-本机访问国外仓库需要走 7897 代理。Gradle 不读取 `HTTP_PROXY` 环境变量，用：
-
-```powershell
-$env:JAVA_TOOL_OPTIONS = '-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=7897 -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=7897'
-```
-
-代理配置故意不写进 `gradle.properties`，避免把机器相关配置带进仓库。
-
 ## 编译目标 IDE
 
 构建需要 `monkeyBrowser.idePath` 指向**本机已安装**的 IDE 目录，`local(...)` 会直接拿它作为平台
@@ -152,7 +152,7 @@ $env:JAVA_TOOL_OPTIONS = '-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=7897 -Dh
 
 | 方式 | 写法 | 适用 |
 | --- | --- | --- |
-| 用户级配置（推荐） | 在 `~/.gradle/gradle.properties` 写 `monkeyBrowser.idePath=D:/Your/IDE` | 配一次全仓库生效，且不会误提交 |
+| 用户级配置（推荐） | 在 `~/.gradle[README.md](../../Nga/README.md)/gradle.properties` 写 `monkeyBrowser.idePath=D:/Your/IDE` | 配一次全仓库生效，且不会误提交 |
 | 命令行 | `.\gradlew.bat -PmonkeyBrowser.idePath="D:/Your/IDE" <task>` | 临时换目标 IDE |
 
 > **未设置会在配置阶段直接失败**，报错信息会告诉你该怎么填。因为失败发生在配置阶段，
