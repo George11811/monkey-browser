@@ -13,6 +13,9 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
+import com.ridermonkey.browser.DisguisePolicy
+import com.ridermonkey.browser.DisguiseSettings
+import com.ridermonkey.browser.ImageContextAction
 import com.ridermonkey.browser.PopupDecision
 import com.ridermonkey.browser.PopupRouting
 import com.ridermonkey.storage.BookmarkStore
@@ -25,18 +28,25 @@ import com.ridermonkey.userscript.GmBridge
 import com.ridermonkey.userscript.GmHost
 import com.ridermonkey.userscript.ScriptInjector
 import com.ridermonkey.util.UrlUtils
+import java.io.File
 import org.cef.CefSettings
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
+import org.cef.callback.CefContextMenuParams
+import org.cef.callback.CefMenuModel
+import org.cef.handler.CefContextMenuHandlerAdapter
 import org.cef.handler.CefDisplayHandlerAdapter
 import org.cef.handler.CefLifeSpanHandlerAdapter
 import org.cef.handler.CefLoadHandler
 import org.cef.network.CefRequest
 import java.awt.BorderLayout
+import java.awt.CardLayout
+import java.awt.Component
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridLayout
 import java.awt.Insets
+import java.awt.MouseInfo
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.FocusAdapter
@@ -56,6 +66,7 @@ import javax.swing.JMenu
 import javax.swing.JMenuItem
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
+import javax.swing.MenuSelectionManager
 import javax.swing.SwingUtilities
 import javax.swing.Timer
 import javax.swing.event.DocumentEvent
@@ -93,6 +104,47 @@ class BrowserPanel(
 ) : Disposable {
 
     private val root = JPanel(BorderLayout())
+
+    /**
+     * 摸鱼遮罩：指针离开面板后，用一个「普通编辑器」样式的假页面盖住整个面板（ADR-0019）。
+     *
+     * 布局要点（评审纠错）：BorderLayout 的 CENTER 是**单槽**，同一约束加两个组件
+     * 只有最后那个能拿到边界，前一个会停在 0x0（JCEF 组件因此永远不满足
+     * `ensureKernel` 的尺寸检查）。所以网页与遮罩放进一个 CardLayout 宿主，切换卡片即可。
+     */
+    private val disguisePanel = DisguisePanel()
+    private val centerHost = JPanel(CardLayout())
+    private val disguiseTimer = Timer(DisguisePolicy.POLL_MS.toInt()) { tickDisguise() }
+
+    /** 摸鱼遮罩开关（工具栏）；状态持久化在 [DisguiseSettings]，多标签页共享。 */
+    private val disguiseButton = ToolbarButton("伪装开")
+
+    /** 当前开关状态缓存：每 tick 与 [DisguiseSettings] 对一次，用于刷新按钮文案。 */
+    private var disguiseEnabled = true
+
+    /** 指针是否至少进过面板一次：没进过就不遮，避免「切到这个标签页立刻被盖住」。 */
+    private var disguiseArmed = false
+
+    /** 本轮「指针在面板外」的起始时间；null = 当前没在累计。 */
+    private var pointerOutsideSince: Long? = null
+
+    private var disguised = false
+
+    /** 遮罩期间被隐藏的子组件及其原可见性（解除时原样恢复）。 */
+    private val hiddenByDisguise = LinkedHashMap<Component, Boolean>()
+
+    /**
+     * CEF 右键菜单是否打开：打开期间不遮（否则遮罩会浮在菜单背后）。
+     *
+     * 这两个字段由 CEF 线程写、EDT 读，必须 volatile；写入顺序也必须是
+     * 「先时间戳、后标志」，否则 EDT 可能读到 (true, 0) 并立刻按超时复位。
+     */
+    @Volatile
+    private var contextMenuOpen = false
+
+    @Volatile
+    private var contextMenuOpenedAt = 0L
+
     private val addressField = JBTextField()
     private val statusLabel = JBLabel(" ")
     private val backButton = ToolbarButton(AllIcons.Actions.Back)
@@ -180,6 +232,18 @@ class BrowserPanel(
         /** 尺寸推送的最小间隔；见 schedulePushSize 的说明。 */
         const val SIZE_PUSH_MIN_INTERVAL_MS = 100L
 
+        /**
+         * CEF 右键菜单「最长可信打开时间」。
+         *
+         * onContextMenuDismissed 正常会复位标志；万一没来（菜单以外的方式关掉等），
+         * 超过这个时间就当作已关闭，不能让摸鱼遮罩从此永久失效。
+         */
+        const val CONTEXT_MENU_MAX_OPEN_MS = 120_000L
+
+        /** CardLayout 的两张卡：网页 / 摸鱼遮罩。 */
+        const val CARD_BROWSER = "browser"
+        const val CARD_DISGUISE = "disguise"
+
     }
 
     /** 上一次推给内核的尺寸，避免重复推送与刷日志。 */
@@ -207,10 +271,17 @@ class BrowserPanel(
 
     init {
         root.add(createToolbar(), BorderLayout.NORTH)
-        root.add(createBrowserComponent(), BorderLayout.CENTER)
+        centerHost.add(createBrowserComponent(), CARD_BROWSER)
+        centerHost.add(disguisePanel, CARD_DISGUISE)
+        root.add(centerHost, BorderLayout.CENTER)
         root.add(statusLabel, BorderLayout.SOUTH)
+        (centerHost.layout as CardLayout).show(centerHost, CARD_BROWSER)
+        disguiseEnabled = DisguiseSettings.isEnabled()
+        updateDisguiseButton()
         resetNavigationState()
         renderStatus()
+        // 轮询式判定：Swing 的 mouseExited 在进入子组件时也会触发，JCEF 的指针交互更是发生在 CEF 侧。
+        disguiseTimer.start()
     }
 
     private fun createToolbar(): JComponent {
@@ -228,6 +299,8 @@ class BrowserPanel(
 
         newTabButton.toolTipText = "新建标签页"
         newTabButton.addActionListener { onNewTab() }
+
+        disguiseButton.addActionListener { toggleDisguise() }
 
 
         backButton.addActionListener { browser?.cefBrowser?.goBack() }
@@ -286,10 +359,17 @@ class BrowserPanel(
         // 侧边 ToolWindow 的横向空间太紧，一行塞不下「5 个按钮 + 有可用宽度的地址栏」，
         // 实测地址栏会被压到只剩几十像素。拆成两行：上行工具栏按钮，下行地址栏独占整宽。
         // 想换成「地址栏在上、按钮在下」只需调换下面两行的添加顺序。
+        //
+        // 摸鱼伪装开关放在地址栏右侧，而不是挤进按钮行：
+        // 按钮行在侧边栏本来就紧（六个图标按钮合计 156px），地址栏这行有富余宽度可让。
+        val addressRow = JPanel(BorderLayout(4, 0))
+        addressRow.add(addressField, BorderLayout.CENTER)
+        addressRow.add(disguiseButton, BorderLayout.EAST)
+
         val bar = JPanel(GridLayout(2, 1, 0, 2))
         bar.border = BorderFactory.createEmptyBorder(2, 4, 2, 4)
         bar.add(buttonsRow)
-        bar.add(addressField)
+        bar.add(addressRow)
         return bar
     }
 
@@ -388,6 +468,7 @@ class BrowserPanel(
             created.getJBCefClient().addDisplayHandler(UrlHandler(), cef)
             created.getJBCefClient().addDisplayHandler(TooltipHandler(), cef)
             created.getJBCefClient().addLifeSpanHandler(PopupHandler(), cef)
+            created.getJBCefClient().addContextMenuHandler(ImageMenuHandler(), cef)
 
             // 会话恢复：标签页创建时可能内核还没就绪，这里补上那次导航。
             pendingUrl?.let { target ->
@@ -824,6 +905,171 @@ class BrowserPanel(
         addressEditedByUser = false
     }
 
+    /**
+     * 摸鱼遮罩的定时判定（每 [DisguisePolicy.POLL_MS] 一次，在 EDT）。
+     *
+     * 只做三件事：面板是否可见、指针是否在面板内、是否被菜单抑制；真正落 UI 的是 [setDisguised]。
+     */
+    private fun tickDisguise() {
+        if (disposed.get()) return
+        // 开关可能被别的标签页/本面板工具栏改动：每 tick 对一次，顺带刷新按钮文案。
+        val enabled = DisguiseSettings.isEnabled()
+        if (enabled != disguiseEnabled) {
+            disguiseEnabled = enabled
+            updateDisguiseButton()
+        }
+        if (!enabled) {
+            // 关掉开关：立即恢复，并取消武装（重新打开后要求指针先进面板一次）。
+            pointerOutsideSince = null
+            disguiseArmed = false
+            setDisguised(false)
+            return
+        }
+        // 标签页没选中 / 工具窗收起：不遮，也不累计时间。
+        // 同时**取消武装**：重新可见时要求指针先进来一次，否则「切回该标签页」会立刻被盖住。
+        if (!root.isShowing) {
+            pointerOutsideSince = null
+            disguiseArmed = false
+            setDisguised(false)
+            return
+        }
+        if (pointerInsidePanel()) {
+            disguiseArmed = true
+            pointerOutsideSince = null
+            setDisguised(false)
+            return
+        }
+        // 单调时钟：墙钟被 NTP 回拨会让 outsideSince 落在未来，遮罩静默失效到时钟追上。
+        val now = System.nanoTime() / 1_000_000
+        if (!DisguisePolicy.mayTrack(
+                pointerInside = false,
+                armed = disguiseArmed,
+                menuOpen = isMenuInUse(now),
+                enabled = enabled
+            )
+        ) {
+            // 被抑制（菜单开着 / 还没武装）时清空计时：菜单一关不能立刻闪出遮罩。
+            pointerOutsideSince = null
+            return
+        }
+        val since = pointerOutsideSince ?: now.also { pointerOutsideSince = it }
+        if (!disguised && DisguisePolicy.delayElapsed(since, now)) {
+            setDisguised(true)
+        }
+    }
+
+    /** 指针是否在面板（含工具栏、地址栏、网页区）范围内。 */
+    private fun pointerInsidePanel(): Boolean {
+        // 取不到指针位置（无头环境等）时按「在里面」处理：宁可不遮，也不要误遮。
+        val pointer = MouseInfo.getPointerInfo() ?: return true
+        // convertPointFromScreen 是 void（原地改坐标），不是返回新点。
+        val location = pointer.location
+        SwingUtilities.convertPointFromScreen(location, root)
+        return root.contains(location)
+    }
+
+    /**
+     * 是否有菜单正在使用。
+     *
+     * 两类都要挡：
+     * - CEF 右键菜单（[ImageMenuHandler] 的 onBeforeContextMenu / onContextMenuDismissed 置位与复位）；
+     * - 书签等 Swing 弹出菜单（指针在菜单上时，面板必然在指针外）。
+     */
+    private fun isMenuInUse(now: Long): Boolean {
+        if (contextMenuOpen && now - contextMenuOpenedAt > CONTEXT_MENU_MAX_OPEN_MS) {
+            // 兜底：复位回调万一没来，标志不能把遮罩从此永久禁用。
+            contextMenuOpen = false
+        }
+        if (contextMenuOpen) return true
+        // Swing 弹出菜单（书签等）：只认「确实还在显示」的最后一级。
+        // 只判 selectedPath 非空的话，一旦残留就会永久不遮，且这里没有 CEF 那样的超时兜底。
+        val last = MenuSelectionManager.defaultManager().selectedPath.lastOrNull() as? Component
+        return last?.isShowing == true
+    }
+
+    /**
+     * 进入/退出伪装。
+     *
+     * 用「隐藏其它子组件」而不是盖一层半透明蒙板：JCEF 是 OSR 组件（自绘），
+     * 叠层要靠绘制顺序保证盖得住，一旦 CEF 自己触发重绘就会露出来；隐藏则是结构性的，没有这个风险。
+     */
+    private fun setDisguised(value: Boolean) {
+        if (disguised == value) return
+        disguised = value
+        if (value) {
+            hiddenByDisguise.clear()
+            for (child in root.components) {
+                // centerHost 由 CardLayout 自己切卡，不能连它一起隐藏。
+                if (child === centerHost) continue
+                hiddenByDisguise[child] = child.isVisible
+                child.isVisible = false
+            }
+            (centerHost.layout as CardLayout).show(centerHost, CARD_DISGUISE)
+            logger.info(
+                "[RM-BROWSER] 面板#" + System.identityHashCode(this) +
+                    " 已伪装（指针离开面板超过 " + DisguisePolicy.DELAY_MS + "ms）"
+            )
+        } else {
+            (centerHost.layout as CardLayout).show(centerHost, CARD_BROWSER)
+            for ((child, visible) in hiddenByDisguise) {
+                child.isVisible = visible
+            }
+            hiddenByDisguise.clear()
+            logger.info("[RM-BROWSER] 面板#" + System.identityHashCode(this) + " 伪装解除（指针回到面板）")
+        }
+        root.revalidate()
+        root.repaint()
+        if (!value && !disposed.get()) {
+            // 隐藏期间 CEF 并不知道组件被藏起来了（没有人调 wasHidden），它仍在渲染；
+            // 恢复后要「清掉同尺寸去重 + 重推一次尺寸」（wasResized + notifyScreenInfoChanged），
+            // 否则 OSR 可能把恢复前的旧帧 blit 回来（黑屏/花屏的典型触发点）。
+            //
+            // 必须等布局落地：切卡后非当前卡的尺寸要等一次 validate 才更新，之前可能是 0×0，
+            // 直接 schedulePushSize 会被尺寸检查挡掉，重推就成了空操作（评审指出的时序问题）。
+            SwingUtilities.invokeLater {
+                root.validate()
+                lastPushedWidth = -1
+                lastPushedHeight = -1
+                kernelBrowser?.let { schedulePushSize(it) }
+            }
+        }
+    }
+
+    /**
+     * 切换摸鱼遮罩开关。
+     *
+     * 关闭时**立即**恢复（不等下一个 tick），并取消武装：重新开启后要求指针先进面板一次，
+     * 避免「刚打开开关、指针恰好在面板外」时立刻被盖住。
+     */
+    private fun toggleDisguise() {
+        disguiseEnabled = !disguiseEnabled
+        DisguiseSettings.setEnabled(disguiseEnabled)
+        updateDisguiseButton()
+        if (!disguiseEnabled) {
+            pointerOutsideSince = null
+            disguiseArmed = false
+            setDisguised(false)
+        }
+        logger.info(
+            "[RM-BROWSER] 面板#" + System.identityHashCode(this) +
+                " 摸鱼伪装已" + (if (disguiseEnabled) "开启" else "关闭")
+        )
+    }
+
+    /** 刷新开关按钮的文案、尺寸与提示（文字按钮尺寸要显式给，绕开 L&F 的 82px 下限）。 */
+    private fun updateDisguiseButton() {
+        disguiseButton.text = if (disguiseEnabled) "伪装开" else "伪装关"
+        disguiseButton.preferredSize = Dimension(
+            disguiseButton.getFontMetrics(disguiseButton.font).stringWidth(disguiseButton.text) + 16,
+            iconButtonHeight()
+        )
+        disguiseButton.toolTipText = if (disguiseEnabled) {
+            "摸鱼伪装：已开启（鼠标离开本面板时把页面盖成普通编辑器窗口）；点击关闭"
+        } else {
+            "摸鱼伪装：已关闭；点击开启"
+        }
+    }
+
     private fun renderStatus() {
         statusLabel.text = when {
             lastError != null -> lastError
@@ -844,6 +1090,9 @@ class BrowserPanel(
         // JBCefBrowser 是 this 的子 disposable，Disposer 会负责真正的释放。
         // 这里置位 disposed 拦住已排队的 EDT 任务，并解除引用避免回调再触碰视图。
         disposed.set(true)
+        disguiseTimer.stop()
+        // 释放时若正处于伪装：先恢复子组件的可见性，不要把隐藏态带进一个已释放的面板。
+        if (disguised) setDisguised(false)
         browser = null
         logger.info("[RM-BROWSER] 面板#" + System.identityHashCode(this) + " 已释放")
     }
@@ -917,6 +1166,111 @@ class BrowserPanel(
             }
             open(url)
             logger.info("[RM-BROWSER] 弹窗已开成标签页 -> " + url)
+        }
+    }
+
+    /**
+     * 图片右键菜单：给 CEF 原生菜单追加一项「在系统看图软件打开」。
+     *
+     * 为什么是「追加」而不是自己造菜单：JBCefClient 的 context menu handler 是
+     * **handleAll** 语义（逐个调用、模型共享），IntelliJ 自己的 DefaultCefContextMenuHandler
+     * 先跑、我们后跑，所以只能往 model 里加，绝不能 clear —— clear 会把
+     * 复制/粘贴/后退/检查等原生项一并抹掉。
+     *
+     * 两个回调都在 CEF 线程：菜单构建只碰 native model；真正干活（下载）丢到后台线程。
+     */
+    private inner class ImageMenuHandler : CefContextMenuHandlerAdapter() {
+
+        override fun onBeforeContextMenu(
+            cefBrowser: CefBrowser?,
+            frame: CefFrame?,
+            params: CefContextMenuParams?,
+            model: CefMenuModel?
+        ) {
+            // 菜单打开期间不启用摸鱼遮罩：指针必然在菜单上（面板外），遮罩会浮在菜单背后。
+            contextMenuOpenedAt = System.nanoTime() / 1_000_000
+            contextMenuOpen = true
+            if (params == null || model == null) return
+            val source = imageSourceOf(params) ?: return
+            val insertAt = model.count
+            if (model.addItem(ImageContextAction.COMMAND_ID, ImageContextAction.LABEL)) {
+                // 先加项、再在它的原位置插分隔线：addItem 失败时不会留下一条孤立分隔线。
+                model.insertSeparatorAt(insertAt)
+                logger.info("[RM-BROWSER] 图片右键菜单追加「" + ImageContextAction.LABEL + "」-> " + source)
+            } else {
+                // 命令号越界或菜单模型不可用：CEF 会静默忽略，这里必须留下证据。
+                logger.info("[RM-BROWSER] 图片右键菜单追加失败（命令号/菜单模型不可用）-> " + source)
+            }
+        }
+
+        override fun onContextMenuCommand(
+            cefBrowser: CefBrowser?,
+            frame: CefFrame?,
+            params: CefContextMenuParams?,
+            commandId: Int,
+            eventFlags: Int
+        ): Boolean {
+            // 不是我们的项就交回给其它 handler（IntelliJ 用 28500 处理 Open DevTools）。
+            if (commandId != ImageContextAction.COMMAND_ID || params == null) return false
+            val source = imageSourceOf(params) ?: return false
+            // 浏览器发请求时带的是「发起请求的文档」地址：iframe 里的图片应当是 frameUrl。
+            val frameUrl = params.frameUrl?.trim().orEmpty()
+            openImageInSystemViewer(source, if (frameUrl.isNotEmpty()) frameUrl else params.pageUrl)
+            return true
+        }
+
+        override fun onContextMenuDismissed(cefBrowser: CefBrowser?, frame: CefFrame?) {
+            contextMenuOpen = false
+        }
+
+        private fun imageSourceOf(params: CefContextMenuParams): String? {
+            val source = ImageContextAction.pickSourceUrl(
+                hasImageContents = params.hasImageContents(),
+                mediaTypeName = params.mediaType?.name,
+                rawSourceUrl = params.sourceUrl
+            ) ?: return null
+            // 防御：CSS 背景图之类非 <img> 节点上，CEF 会把 sourceUrl 回退成页面地址，
+            // 那个地址取回来是 HTML —— 出项只会是死项。
+            // 只在「上下文不是图片元素」时才用这条判据，避免误伤「直接打开了图片地址」的页面。
+            if (!params.hasImageContents() && source == params.pageUrl) return null
+            return source
+        }
+    }
+
+    /**
+     * 下载图片并用系统默认程序（看图软件）打开。
+     *
+     * 下载必须离开 CEF 线程与 EDT：HttpClient.send 是阻塞的。结果回到 EDT 才写状态栏 ——
+     * [renderStatus] 只认字段，见类注释。
+     */
+    private fun openImageInSystemViewer(imageUrl: String, referer: String?) {
+        logger.info("[RM-BROWSER] 图片下载开始 -> " + imageUrl)
+        onEdt {
+            lastError = "正在下载图片…"
+            renderStatus()
+        }
+        ApplicationManager.getApplication().executeOnPooledThread {
+            // 面板已释放（标签页被关掉）：不再下载，也不再替用户拉起外部程序。
+            if (disposed.get()) return@executeOnPooledThread
+            var saved: File? = null
+            val result = runCatching {
+                val file = SystemImageViewer.saveToTempFile(imageUrl, referer)
+                saved = file
+                SystemImageViewer.openExternally(file)
+            }
+            onEdt {
+                val file = saved
+                result.onSuccess {
+                    logger.info("[RM-BROWSER] 图片已交给系统看图软件 -> " + (file?.absolutePath ?: imageUrl))
+                    lastError = "已在系统看图软件中打开：" + (file?.name ?: imageUrl)
+                }.onFailure {
+                    // 打开失败时文件通常已经落盘（工程约定不主动删文件）：把路径给出来，用户可以自己打开。
+                    val pathHint = file?.let { "（已下载到 " + it.absolutePath + "）" }.orEmpty()
+                    logger.info("[RM-BROWSER] 图片打开失败：" + it.message + pathHint)
+                    lastError = "图片打开失败：" + (it.message ?: it.javaClass.simpleName) + pathHint
+                }
+                renderStatus()
+            }
         }
     }
 

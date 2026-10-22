@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.ridermonkey"
-version = "0.17.7"
+version = "0.19.1"
 
 // 编译目标 IDE 的安装目录。缺属性时给出可操作的报错，而不是 NoSuchElementException。
 // 注意：报错发生在配置阶段，因此 gradlew tasks 之类的任务同样会失败——这是有意的。
